@@ -1,7 +1,9 @@
 # scraper.py
 from typing import Any, Dict, List, Mapping, MutableMapping, Sequence, Optional
+from urllib.parse import urlparse
 
 from requests_html import HTMLSession
+from staffspy import LinkedInAccount
 
 
 def scrape_generic(
@@ -206,3 +208,90 @@ def scrape_recipe(
         "ingredients": generic_result.get("ingredients") or [],
         "instructions": generic_result.get("instructions") or [],
     }
+
+
+def _extract_linkedin_user_id(profile_url: str) -> Optional[str]:
+    """
+    Extract the LinkedIn user id/slug from a profile URL.
+
+    Example:
+      https://www.linkedin.com/in/dougmcmillon -> dougmcmillon
+    """
+    try:
+        parsed = urlparse(profile_url)
+        path = (parsed.path or "").strip("/")
+        if not path:
+            return None
+        segments = path.split("/")
+        if "in" in segments:
+            idx = segments.index("in")
+            if idx + 1 < len(segments):
+                return segments[idx + 1]
+        # Fallback: last segment
+        return segments[-1] if segments else None
+    except Exception:
+        return None
+
+
+def scrape_linkedin_profiles(
+    profile_urls: Sequence[str],
+    session_file: str = "linkedin_session.pkl",
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+    log_level: int = 1,
+) -> List[Dict[str, Any]]:
+    """
+    Scrape LinkedIn profiles using the StaffSpy library.
+
+    This expects full LinkedIn profile URLs and converts them into the
+    username/slug format StaffSpy's ``scrape_users`` API expects.
+
+    Authentication is handled by StaffSpy:
+      - If ``session_file`` exists, it will reuse saved cookies.
+      - If ``username`` and ``password`` are provided, it can perform login.
+
+    Returns a list of dicts (one per profile).
+    """
+    user_ids: List[str] = []
+    for url in profile_urls:
+        user_id = _extract_linkedin_user_id(url)
+        if user_id:
+            user_ids.append(user_id)
+
+    if not user_ids:
+        return []
+
+    account_kwargs: Dict[str, Any] = {
+        "session_file": session_file,
+        "log_level": log_level,
+    }
+    if username and password:
+        account_kwargs["username"] = username
+        account_kwargs["password"] = password
+
+    account = LinkedInAccount(**account_kwargs)
+
+    # Call StaffSpy one user at a time so that a failure for a single profile
+    # (e.g. hidden / not found) doesn't break the entire batch.
+    all_rows: List[Dict[str, Any]] = []
+
+    for user_id in user_ids:
+        try:
+            result = account.scrape_users(user_ids=[user_id])
+        except Exception as exc:  # pragma: no cover - defensive runtime guard
+            # Log to stdout so it's visible in the container / Streamlit logs,
+            # but continue with other users.
+            print(f"StaffSpy error for user_id {user_id!r}: {exc!r}")
+            continue
+
+        if hasattr(result, "to_dict"):
+            # type: ignore[call-arg]
+            rows = result.to_dict(orient="records")
+        elif isinstance(result, list):
+            rows = result  # type: ignore[assignment]
+        else:
+            rows = [result]  # type: ignore[list-item]
+
+        all_rows.extend(rows)
+
+    return all_rows

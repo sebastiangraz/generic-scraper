@@ -4,4 +4,5 @@ requests-html>=0.10.0
 beautifulsoup4>=4.12.0
 selenium>=4.18.0
 webdriver-manager>=4.0.1
-lxml[html_clean]>=5.1.0 
+lxml[html_clean]>=5.1.0
+staffspy[browser]>=0.2.25
