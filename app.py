@@ -125,6 +125,7 @@ def main():
 
     # Checkbox for rendering JavaScript
     render_js = st.checkbox("Render JavaScript?", value=False)
+    debug_enabled = st.checkbox("Show debug information", value=False)
 
     # Scrape button
     if st.button("Scrape"):
@@ -143,7 +144,7 @@ def main():
             results = []
             for url in urls:
                 page_data = scrape_generic(
-                    url, active_fields, render_js=render_js)
+                    url, active_fields, render_js=render_js, debug=debug_enabled)
                 results.append(page_data)
 
         st.success("Scraping complete!")
@@ -152,6 +153,8 @@ def main():
         for idx, result in enumerate(results, start=1):
             st.subheader(f"Result #{idx}")
             st.write(f"**URL**: {result.get('url')}")
+
+            debug_info = result.get("_debug")
 
             for field in active_fields:
                 name = (field.get("name") or "").strip() or "field"
@@ -179,6 +182,32 @@ def main():
                         st.write("*No image found.*")
                 else:
                     st.write(f"**{name}**: {value or 'N/A'}")
+
+            if debug_enabled and debug_info:
+                with st.expander("Debug details"):
+                    st.write("**HTTP**")
+                    st.write(
+                        f"Status: {debug_info.get('status_code')} | OK: {debug_info.get('ok')}")
+                    st.write(f"Final URL: {debug_info.get('final_url')}")
+
+                    if "error" in debug_info:
+                        st.write("**Error**")
+                        st.code(str(debug_info["error"]))
+
+                    fields_debug = debug_info.get("fields") or {}
+                    if fields_debug:
+                        st.write("**Fields**")
+                        for fname, finfo in fields_debug.items():
+                            st.write(f"- **{fname}**")
+                            st.write(
+                                f"  - Type: `{finfo.get('type')}`  \n"
+                                f"  - XPath: `{finfo.get('xpath')}`  \n"
+                                f"  - Match count: {finfo.get('match_count')}"
+                            )
+                            sample = finfo.get("sample")
+                            if sample is not None:
+                                st.write("  - Sample:")
+                                st.code(str(sample)[:500])
 
             st.write("---")  # Divider
 

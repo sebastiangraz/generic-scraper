@@ -1,5 +1,5 @@
 # scraper.py
-from typing import Any, Dict, List, Mapping, MutableMapping, Sequence
+from typing import Any, Dict, List, Mapping, MutableMapping, Sequence, Optional
 
 from requests_html import HTMLSession
 
@@ -8,6 +8,7 @@ def scrape_generic(
     url: str,
     fields: Sequence[Mapping[str, Any]],
     render_js: bool = False,
+    debug: bool = False,
 ) -> Dict[str, Any]:
     """
     Scrape arbitrary content from a page using XPath expressions.
@@ -30,9 +31,18 @@ def scrape_generic(
     """
     session = HTMLSession()
     data: Dict[str, Any] = {"url": url}
+    debug_info: Dict[str, Any] = {}
+    # Always initialise so we can safely reference it even if an exception
+    # occurs before we start iterating over fields.
+    field_debug: Dict[str, Any] = {}
 
     try:
         response = session.get(url)
+
+        if debug:
+            debug_info["status_code"] = getattr(response, "status_code", None)
+            debug_info["ok"] = getattr(response, "ok", None)
+            debug_info["final_url"] = str(getattr(response, "url", url))
 
         if render_js:
             # Render JS if needed (this can be slow)
@@ -68,6 +78,21 @@ def scrape_generic(
                     if text:
                         items.append(text)
                 data[name] = items
+
+                if debug:
+                    sample: Optional[str] = None
+                    if elems:
+                        first = elems[0]
+                        if hasattr(first, "text"):
+                            sample = (getattr(first, "text", "") or "").strip()
+                        else:
+                            sample = str(first).strip()
+                    field_debug[name] = {
+                        "type": field_type,
+                        "xpath": xpath,
+                        "match_count": len(elems),
+                        "sample": sample,
+                    }
                 continue
 
             # IMAGE: return a best-guess URL-like attribute if present.
@@ -100,6 +125,14 @@ def scrape_generic(
                             value = text or None
 
                 data[name] = value
+
+                if debug:
+                    field_debug[name] = {
+                        "type": field_type,
+                        "xpath": xpath,
+                        "match_count": len(nodes),
+                        "sample": value,
+                    }
                 continue
 
             # SINGLE (default): first node's text or string value.
@@ -110,12 +143,28 @@ def scrape_generic(
                     text = (getattr(elem, "text", "") or "").strip()
                 else:
                     text = str(elem).strip()
-                data[name] = text or None
+                value = text or None
+                data[name] = value
             else:
-                data[name] = None
+                value = None
+
+            if debug:
+                field_debug[name] = {
+                    "type": field_type,
+                    "xpath": xpath,
+                    "match_count": len(nodes),
+                    "sample": value,
+                }
 
     except Exception as e:  # pragma: no cover - defensive logging
-        print(f"Error scraping {url} - {e}")
+        if debug:
+            debug_info["error"] = repr(e)
+        else:
+            print(f"Error scraping {url} - {e}")
+
+    if debug:
+        debug_info["fields"] = field_debug
+        data["_debug"] = debug_info
 
     return data
 
