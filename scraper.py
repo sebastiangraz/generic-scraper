@@ -1,29 +1,35 @@
 # scraper.py
+from typing import Any, Dict, List, Mapping, MutableMapping, Sequence
+
 from requests_html import HTMLSession
 
-def scrape_recipe(url, selectors, render_js=False):
+
+def scrape_generic(
+    url: str,
+    fields: Sequence[Mapping[str, Any]],
+    render_js: bool = False,
+) -> Dict[str, Any]:
     """
-    Scrapes a recipe using custom CSS selectors.
-    
+    Scrape arbitrary content from a page using XPath expressions.
+
     :param url: The URL to scrape.
-    :param selectors: A dict with keys like "title", "ingredients", "instructions"
-                      and corresponding CSS selector strings.
+    :param fields: A sequence of field definitions, each of which is a mapping
+                   with at least:
+                     - ``name``: display name / key for the field
+                     - ``type``: one of ``\"single\"``, ``\"multiple\"``, ``\"image\"``
+                     - ``selector``: XPath string (often copied directly from your browser devtools)
     :param render_js: Whether to render the page with JavaScript (Pyppeteer).
-    :return: A dict with the scraped data:
+
+    :return: A dict with the scraped data, e.g.:
              {
-                "url": ...,
-                "title": ...,
-                "ingredients": [...],
-                "instructions": [...]
+               "url": "...",
+               "Title": "My page title",
+               "Ingredients": ["Item 1", "Item 2"],
+               "Hero image": "https://example.com/image.jpg",
              }
     """
     session = HTMLSession()
-    data = {
-        "url": url,
-        "title": None,
-        "ingredients": [],
-        "instructions": []
-    }
+    data: Dict[str, Any] = {"url": url}
 
     try:
         response = session.get(url)
@@ -31,29 +37,123 @@ def scrape_recipe(url, selectors, render_js=False):
         if render_js:
             # Render JS if needed (this can be slow)
             response.html.render(sleep=1, timeout=20)
-        
-        # 1) Title
-        title_selector = selectors.get("title", None)
-        if title_selector:
-            title_elem = response.html.find(title_selector, first=True)
-            if title_elem:
-                data["title"] = title_elem.text.strip()
 
-        # 2) Ingredients
-        ingredients_selector = selectors.get("ingredients", None)
-        if ingredients_selector:
-            ingredient_elems = response.html.find(ingredients_selector)
-            for elem in ingredient_elems:
-                data["ingredients"].append(elem.text.strip())
+        # Use the underlying lxml tree so XPaths copied from browser devtools
+        # (including \"Copy full XPath\") work as expected.
+        root = getattr(response.html, "lxml", None)
+        if root is None:
+            # Fallback: let requests-html build the lxml tree.
+            root = response.html
 
-        # 3) Instructions
-        instructions_selector = selectors.get("instructions", None)
-        if instructions_selector:
-            instruction_elems = response.html.find(instructions_selector)
-            for elem in instruction_elems:
-                data["instructions"].append(elem.text.strip())
+        for field in fields:
+            # Defensive access – tolerate partial/malformed configs.
+            name = str(field.get("name") or "").strip() or "field"
+            field_type = str(field.get("type") or "single").lower()
+            xpath = str(field.get("selector") or "").strip()
 
-    except Exception as e:
+            if not xpath:
+                data[name] = None
+                continue
+
+            # MULTIPLE: return list of text values.
+            if field_type == "multiple":
+                elems = root.xpath(xpath)
+                items: List[str] = []
+                for elem in elems:
+                    # Element or raw string (e.g. //img/@src)
+                    if hasattr(elem, "text"):
+                        text = (getattr(elem, "text", "") or "").strip()
+                    else:
+                        text = str(elem).strip()
+                    if text:
+                        items.append(text)
+                data[name] = items
+                continue
+
+            # IMAGE: return a best-guess URL-like attribute if present.
+            if field_type == "image":
+                nodes = root.xpath(xpath)
+                value: Any = None
+                if nodes:
+                    elem = nodes[0]
+                    # If the XPath targets an attribute directly (//img/@src) we
+                    # will get back a plain string.
+                    if not hasattr(elem, "attrib") and not hasattr(elem, "attrs"):
+                        value = str(elem).strip() or None
+                    else:
+                        # Try lxml-style attributes first, then requests-html attrs.
+                        attrs: MutableMapping[str, Any] = {}
+                        if hasattr(elem, "attrib"):
+                            attrs.update(getattr(elem, "attrib", {}) or {})
+                        if hasattr(elem, "attrs"):
+                            attrs.update(getattr(elem, "attrs", {}) or {})
+
+                        value = (
+                            attrs.get("src")
+                            or attrs.get("data-src")
+                            or attrs.get("data-image")
+                            or attrs.get("href")
+                        )
+                        # As a fallback, try the element text.
+                        if value is None:
+                            text = (getattr(elem, "text", "") or "").strip()
+                            value = text or None
+
+                data[name] = value
+                continue
+
+            # SINGLE (default): first node's text or string value.
+            nodes = root.xpath(xpath)
+            if nodes:
+                elem = nodes[0]
+                if hasattr(elem, "text"):
+                    text = (getattr(elem, "text", "") or "").strip()
+                else:
+                    text = str(elem).strip()
+                data[name] = text or None
+            else:
+                data[name] = None
+
+    except Exception as e:  # pragma: no cover - defensive logging
         print(f"Error scraping {url} - {e}")
 
     return data
+
+
+def scrape_recipe(
+    url: str,
+    selectors: Mapping[str, str],
+    render_js: bool = False,
+) -> Dict[str, Any]:
+    """
+    Backwards-compatible helper that uses ``scrape_generic`` under the hood.
+
+    ``selectors`` is expected to be a mapping with keys like
+    ``\"title\"``, ``\"ingredients\"``, ``\"instructions\"``.
+    """
+    fields: List[Dict[str, Any]] = [
+        {
+            "name": "title",
+            "type": "single",
+            "selector": selectors.get("title", ""),
+        },
+        {
+            "name": "ingredients",
+            "type": "multiple",
+            "selector": selectors.get("ingredients", ""),
+        },
+        {
+            "name": "instructions",
+            "type": "multiple",
+            "selector": selectors.get("instructions", ""),
+        },
+    ]
+
+    generic_result = scrape_generic(url, fields, render_js=render_js)
+
+    return {
+        "url": generic_result.get("url"),
+        "title": generic_result.get("title"),
+        "ingredients": generic_result.get("ingredients") or [],
+        "instructions": generic_result.get("instructions") or [],
+    }
